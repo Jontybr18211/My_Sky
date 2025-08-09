@@ -1,0 +1,8 @@
+Core application libraries
+PyQt6==6.9.1
+pyqtgraph==0.13.7
+requests==2.32.4
+python-dotenv==1.1.1
+
+Dependencies
+numpy==2.3.2
