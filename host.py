@@ -301,7 +301,7 @@ def init_session_state():
         st.session_state.units = DEFAULT_UNITS
         
     if 'theme' not in st.session_state:
-        st.session_state.theme = "dark"
+        st.session_state.theme = "dark"  # keep dark as default; user can toggle to light
         
     if 'current_location' not in st.session_state:
         st.session_state.current_location = None
@@ -311,6 +311,9 @@ def init_session_state():
         
     if 'air_data' not in st.session_state:
         st.session_state.air_data = None
+        
+    if 'loading' not in st.session_state:
+        st.session_state.loading = False
 
 def save_history():
     hist_file = pathlib.Path.home() / ".mysky_history.json"
@@ -319,367 +322,189 @@ def save_history():
     except Exception:
         pass
 
-def render_current_weather(owm, data, loc_dict):
-    tz_offset = data.get("timezone_offset", 0)
-    cur = data.get("current", {})
-    
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        # Weather icon
-        icon_code = None
-        if cur.get("weather"):
-            w0 = cur.get("weather")[0] if isinstance(cur.get("weather"), list) and cur.get("weather") else {}
-            icon_code = w0.get("icon")
-            
-        icon_path = get_weather_icon(icon_code)
-        if icon_path:
-            st.image(str(icon_path), width=120)
-        else:
-            st.write("No weather icon available")
-    
-    with col2:
-        # Location and temperature
-        city_label = f"{loc_dict['name']}, {loc_dict['country']}"
-        if loc_dict.get("state"):
-            city_label += f", {loc_dict['state']}"
-        st.subheader(city_label)
-        
-        temp = cur.get("temp")
-        deg = "°C" if st.session_state.units == "metric" else "°F"
-        st.metric("Temperature", f"{temp:.1f} {deg}", delta=None)
-        
-        # Weather description
-        desc = ""
-        if cur.get("weather"):
-            w0 = cur.get("weather")[0] if isinstance(cur.get("weather"), list) and cur.get("weather") else {}
-            desc = w0.get("description", "").capitalize()
-        st.caption(desc)
-    
-    # Sunrise/sunset
-    sunrise_ts = cur.get("sunrise")
-    sunset_ts = cur.get("sunset")
-    sunrise = utc_to_local(sunrise_ts, tz_offset) if sunrise_ts else None
-    sunset = utc_to_local(sunset_ts, tz_offset) if sunset_ts else None
-    
-    if sunrise and sunset:
-        hours = (sunset - sunrise).total_seconds() / 3600.0
-        st.caption(f"🌅 Sunrise: {sunrise.time()}  🌇 Sunset: {sunset.time()}  ⏱️ Day length: {hours:.1f}h")
-    
-    # Additional metrics
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Feels Like", f"{cur.get('feels_like', '--'):.1f} {deg}")
-    with col2:
-        st.metric("Humidity", f"{cur.get('humidity', '--')}%")
-    with col3:
-        st.metric("Wind Speed", f"{cur.get('wind_speed', '--')} m/s")
-
-def render_air_quality(airdata):
-    st.subheader("Air Quality")
-    if not airdata:
-        st.warning("Air quality data not available")
-        return
-    
-    try:
-        rec = airdata.get("list", [{}])[0]
-        main = rec.get("main", {})
-        components = rec.get("components", {})
-        aqi = main.get("aqi")
-        
-        level_text, color = ("-", "#999999")
-        if isinstance(aqi, int) and aqi in AQI_LEVELS:
-            level_text, color = AQI_LEVELS[aqi]
-            
-        # AQI progress bar
-        perf = 0
-        if isinstance(aqi, int):
-            perf = int(round(((aqi - 1) / 4.0) * 100))
-        
-        st.progress(perf, text=f"AQI: {aqi} - {level_text}")
-        
-        # Pollutant details
-        pollutant_cols = st.columns(4)
-        i = 0
-        for k, v in components.items():
-            full = POLLUTANT_FULL.get(k.lower(), k.upper())
-            with pollutant_cols[i % 4]:
-                st.metric(full, f"{v}")
-            i += 1
-            
-    except Exception as e:
-        st.error(f"Error rendering air quality: {e}")
-
-def render_forecast(daily, tz_offset_secs):
-    st.subheader("7-Day Forecast")
-    
-    cols = st.columns(7)
-    for i, day in enumerate(daily[:7]):
-        dt = utc_to_local(day.get("dt"), tz_offset_secs)
-        day_name = dt.strftime("%a %d %b") if dt else "-"
-        temp_min = day.get("temp", {}).get("min", 0.0) or 0.0
-        temp_max = day.get("temp", {}).get("max", 0.0) or 0.0
-        pop = day.get("pop", 0) * 100
-        weather = day.get("weather", [{}])[0]
-        icon = weather.get("icon")
-        
-        with cols[i]:
-            st.subheader(day_name)
-            
-            # Weather icon
-            icon_path = get_weather_icon(icon)
-            if icon_path:
-                st.image(str(icon_path), width=80)
-                
-            # Temperatures
-            deg = "°C" if st.session_state.units == "metric" else "°F"
-            st.write(f"▲ {temp_max:.0f}{deg}")
-            st.write(f"▼ {temp_min:.0f}{deg}")
-            
-            # Precipitation probability
-            st.progress(pop/100, text=f"💧 {pop:.0f}%")
-
-def plot_hourly_data(hourly, tz_offset_secs):
-    st.subheader("Hourly Forecast (48h)")
-    
-    times = []
-    temps = []
-    pops = []
-    winds = []
-    
-    for h in hourly[:48]:
-        ts = h.get("dt")
-        dt = utc_to_local(ts, tz_offset_secs)
-        times.append(dt)
-        temps.append(h.get("temp", math.nan))
-        pops.append((h.get("pop", 0)) * 100)
-        winds.append(h.get("wind_speed", 0))
-    
-    # Create DataFrame
-    df = pd.DataFrame({
-        "Time": times,
-        "Temperature": temps,
-        "Precipitation": pops,
-        "Wind Speed": winds
-    })
-    
-    # Create tabs for each chart
-    tab1, tab2, tab3 = st.tabs(["Temperature", "Precipitation", "Wind Speed"])
-    
-    with tab1:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df["Time"], 
-            y=df["Temperature"],
-            mode='lines+markers',
-            name='Temperature',
-            line=dict(color='#7c3aed', width=3),
-            marker=dict(size=6, color='#7c3aed')
-        ))
-        deg = "°C" if st.session_state.units == "metric" else "°F"
-        fig.update_layout(
-            title="Temperature Forecast",
-            xaxis_title="Time",
-            yaxis_title=f"Temperature ({deg})",
-            template="plotly_dark" if st.session_state.theme == "dark" else "plotly_white"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with tab2:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=df["Time"], 
-            y=df["Precipitation"],
-            name='Precipitation',
-            marker=dict(color='#06b6d4')
-        ))
-        fig.update_layout(
-            title="Precipitation Probability",
-            xaxis_title="Time",
-            yaxis_title="Probability (%)",
-            template="plotly_dark" if st.session_state.theme == "dark" else "plotly_white"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with tab3:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df["Time"], 
-            y=df["Wind Speed"],
-            mode='lines+markers',
-            name='Wind Speed',
-            line=dict(color='#22c55e', width=2),
-            marker=dict(size=6, color='#22c55e')
-        ))
-        fig.update_layout(
-            title="Wind Speed Forecast",
-            xaxis_title="Time",
-            yaxis_title="Wind Speed (m/s)",
-            template="plotly_dark" if st.session_state.theme == "dark" else "plotly_white"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-def main():
-    # Initialize session state
-    init_session_state()
-    
-    # Set page config
-    st.set_page_config(
-        page_title=APP_NAME,
-        page_icon="⛅",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    
-    # Apply custom CSS
-    apply_custom_css()
-    
-    # Check API key
-    if not OPENWEATHER_API_KEY:
-        st.error("No OpenWeather API key found. Please set OPENWEATHER_API_KEY in your environment or .env file.")
-        st.stop()
-    
-    owm = OpenWeather(OPENWEATHER_API_KEY)
-    
-    # Header
-    st.title(f"{APP_NAME} Weather Dashboard")
-    
-    # Search controls
-    with st.form(key="search_form"):
-        col1, col2, col3 = st.columns([4, 2, 1])
-        
-        with col1:
-            city_input = st.text_input("Enter city", placeholder="e.g., 'Paris, FR' or 'Bangalore'")
-        
-        with col2:
-            units = st.selectbox(
-                "Units", 
-                ["metric (°C)", "imperial (°F)"],
-                index=0 if st.session_state.units == "metric" else 1
-            )
-            st.session_state.units = "metric" if units == "metric (°C)" else "imperial"
-            
-        with col3:
-            st.form_submit_button("Search", on_click=handle_search, args=(owm, city_input))
-    
-    # Theme toggle
-    if st.button("Toggle Theme"):
-        st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
-        st.experimental_rerun()
-    
-    # Display loading indicator
-    if st.session_state.get('loading', False):
-        with st.spinner("Fetching weather data..."):
-            time.sleep(0.5)
-    
-    # Display weather data if available
-    if st.session_state.weather_data and st.session_state.current_location:
-        render_current_weather(owm, st.session_state.weather_data, st.session_state.current_location)
-        
-        if st.session_state.air_data:
-            render_air_quality(st.session_state.air_data)
-        
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            render_forecast(
-                st.session_state.weather_data.get("daily", []),
-                st.session_state.weather_data.get("timezone_offset", 0)
-            )
-        with col2:
-            plot_hourly_data(
-                st.session_state.weather_data.get("hourly", []),
-                st.session_state.weather_data.get("timezone_offset", 0)
-            )
-    
-    # History section
-    st.sidebar.subheader("Search History")
-    for loc in st.session_state.history[-10:]:
-        if st.sidebar.button(loc):
-            handle_history_select(owm, loc)
-
-def apply_custom_css():
-    st.markdown("""
-    <style>
-        /* Main content */
-        .stApp {
-            background: linear-gradient(135deg, #0b1220, #071028);
-            color: #e6eef8;
+def apply_custom_css(theme: str):
+    """
+    Apply pastel light (sky-blue) or dark CSS. Light theme uses sky-blue pastel colors and avoids pure white.
+    """
+    if theme == "light":
+        # Sky-blue pastel styling (avoid pure white)
+        css = """
+        <style>
+        :root{
+            --bg: #e6f7ff;        /* pale sky blue */
+            --card: #d7f0ff;      /* soft card blue */
+            --accent1: #60a5fa;   /* sky blue primary */
+            --accent2: #93c5fd;   /* lighter sky */
+            --text: #07224a;      /* deep navy for contrast */
+            --muted: #3b5360;
+            --input-bg: #eef9ff;  /* input background slightly off-white */
+            --table-head-start: #bde9ff;
+            --table-head-end: #d7f0ff;
         }
-        
-        /* Dark theme */
-        [data-theme="dark"] .stApp {
-            background: linear-gradient(135deg, #0b1220, #071028);
-            color: #e6eef8;
+        /* App background and main text */
+        .stApp, .block-container {
+            background: linear-gradient(180deg, var(--bg), #f0fbff) !important;
+            color: var(--text) !important;
+            font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
         }
-        
-        /* Light theme */
-        [data-theme="light"] .stApp {
-            background: linear-gradient(135deg, #f6fbff, #f8f6ff);
-            color: #17233b;
-        }
-        
-        /* Cards */
-        .stMetric {
-            background-color: rgba(12, 16, 24, 0.7) !important;
-            border: 1px solid rgba(255, 255, 255, 0.04) !important;
+        /* Metric / cards */
+        .main .stMetric, .stMetric {
+            background: var(--card) !important;
+            color: var(--text) !important;
             border-radius: 12px !important;
-            padding: 15px !important;
+            padding: 12px !important;
+            box-shadow: 0 4px 12px rgba(12, 40, 60, 0.04);
+            border: 1px solid rgba(7,34,74,0.04) !important;
         }
-        
-        [data-theme="light"] .stMetric {
-            background-color: rgba(232, 241, 249, 0.7) !important;
-            border: 1px solid rgba(20, 30, 50, 0.06) !important;
+        /* Inputs */
+        .stTextInput>div>div>input, .stSelectbox>div>div>div, .stSelectbox>div>div>select, .stTextArea>div>div>textarea {
+            background: var(--input-bg) !important;
+            border: 1px solid rgba(7,34,74,0.06) !important;
+            color: var(--text) !important;
+            border-radius: 10px !important;
+            padding: 8px !important;
         }
-        
         /* Buttons */
         .stButton>button {
-            background: linear-gradient(135deg, #7c3aed, #06b6d4) !important;
+            background: linear-gradient(90deg, var(--accent1), var(--accent2)) !important;
             color: white !important;
+            font-weight: 700 !important;
             border-radius: 10px !important;
+            padding: 8px 14px !important;
+            border: none !important;
+            box-shadow: 0 6px 18px rgba(96,165,250,0.12);
+        }
+        /* Checkbox label color */
+        .css-1v0mbdj.e1fqkh3o2 { color: var(--text); }
+        /* Sunrise text bigger and matching color */
+        .sunrise-sunset {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--text);
+            margin-bottom: 8px;
+        }
+        /* Big progress for sunrise/sunset - sky-blue styling */
+        .sun-progress {
+            width:100%;
+            background: linear-gradient(90deg, rgba(7,34,74,0.04), rgba(7,34,74,0.02));
+            border-radius: 14px;
+            height: 18px;
+            overflow: hidden;
+            box-shadow: inset 0 1px 2px rgba(7,34,74,0.02);
+        }
+        .sun-progress > .bar {
+            height:100%;
+            width:0%;
+            background: linear-gradient(90deg, #7dd3fc, #60a5fa);
+            border-radius: 14px;
+            transition: width 0.7s ease;
+        }
+        /* Forecast table styling with sky-blue headers */
+        .forecast-table .dataframe tbody tr td {
+            padding: 8px 12px;
+            vertical-align: middle;
+            color: var(--text);
+            background: rgba(255,255,255,0); /* keep transparent so card color shows */
+        }
+        .forecast-table .dataframe thead th {
+            background: linear-gradient(90deg, var(--table-head-start), var(--table-head-end));
+            color: var(--text);
+            font-weight: 700;
+            border-bottom: 2px solid rgba(7,34,74,0.06);
+        }
+        /* DataFrame outer container */
+        .stDataFrame>div {
+            background: transparent !important;
+        }
+        /* Plotly charts container (match background) */
+        .element-container .stPlotlyChart, .stPlotlyChart > div {
+            background: transparent !important;
+        }
+        /* small muted text color */
+        .muted { color: var(--muted) !important; font-size: 13px; }
+        </style>
+        """
+    else:
+        # dark theme (soft)
+        css = """
+        <style>
+        :root{
+            --bg:#0b1220;
+            --card:#0f1724;
+            --accent1:#7c3aed;
+            --accent2:#06b6d4;
+            --text:#e6eef8;
+            --muted:#94a3b8;
+        }
+        .stApp, .block-container {
+            background: linear-gradient(180deg, var(--bg), #071028) !important;
+            color: var(--text) !important;
+        }
+        .main .stMetric, .stMetric {
+            background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)) !important;
+            color: var(--text) !important;
+            border-radius: 10px !important;
+            padding: 10px !important;
+        }
+        .stTextInput>div>div>input, .stSelectbox>div>div>div {
+            background: rgba(255,255,255,0.02) !important;
+            border: 1px solid rgba(255,255,255,0.04) !important;
+            color: var(--text) !important;
+            border-radius: 8px !important;
+        }
+        .stButton>button {
+            background: linear-gradient(90deg, var(--accent1), var(--accent2)) !important;
+            color: white !important;
             font-weight: 600 !important;
+            border-radius: 10px !important;
+            padding: 6px 12px !important;
             border: none !important;
         }
-        
-        [data-theme="light"] .stButton>button {
-            background: linear-gradient(135deg, #5eead4, #60a5fa) !important;
+        .sunrise-sunset {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 8px;
         }
-        
-        /* Inputs */
-        .stTextInput>div>div>input {
-            background: rgba(255, 255, 255, 0.02) !important;
-            border: 1px solid rgba(255, 255, 255, 0.06) !important;
-            color: #d8e9ff !important;
+        .sun-progress {
+            width:100%;
+            background: rgba(255,255,255,0.04);
+            border-radius: 14px;
+            height: 16px;
+            overflow: hidden;
+            box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
         }
-        
-        [data-theme="light"] .stTextInput>div>div>input {
-            background: white !important;
-            border: 1px solid rgba(20, 30, 50, 0.08) !important;
-            color: #17233b !important;
+        .sun-progress > .bar {
+            height:100%;
+            width:0%;
+            background: linear-gradient(90deg, #ffd6a5, #ffb4a2);
+            border-radius: 14px;
+            transition: width 0.7s ease;
         }
-        
-        /* Progress bars */
-        .stProgress>div>div>div {
-            background: linear-gradient(90deg, #7c3aed, #06b6d4) !important;
+        .forecast-table .dataframe thead th {
+            background: linear-gradient(90deg,#2b2f4a,#2b394f);
+            color: #e6eef8;
         }
-        
-        [data-theme="light"] .stProgress>div>div>div {
-            background: linear-gradient(90deg, #5eead4, #60a5fa) !important;
-        }
-    </style>
-    """, unsafe_allow_html=True)
+        </style>
+        """
+
+    st.markdown(css, unsafe_allow_html=True)
+
 
 def handle_search(owm, city):
     if not city:
         st.warning("Please enter a city name")
         return
-    
+
     key = f"geocode::{city}"
     cached = cache_get(key)
     if cached:
         if isinstance(cached, list) and len(cached) > 0:
             st.session_state.loading = True
             handle_location_select(owm, cached[0])
+            st.session_state.loading = False
             return
-    
+
     st.session_state.loading = True
     try:
         res = owm.geocode(city, limit=GEOCODING_LIMIT)
@@ -695,6 +520,7 @@ def handle_search(owm, city):
         st.error(f"Geocoding error: {e}")
         st.session_state.loading = False
 
+
 def handle_history_select(owm, location_str):
     # Find the location in history
     for loc in st.session_state.history:
@@ -702,9 +528,9 @@ def handle_history_select(owm, location_str):
             # Recreate the location dict from the history string
             parts = location_str.split(", ")
             name = parts[0]
-            country = parts[1]
+            country = parts[1] if len(parts) > 1 else ""
             state = parts[2] if len(parts) > 2 else None
-            
+
             # We need to geocode again to get lat/lon
             key = f"geocode::{location_str}"
             cached = cache_get(key)
@@ -712,7 +538,7 @@ def handle_history_select(owm, location_str):
                 candidate = cached[0]
                 handle_location_select(owm, candidate)
                 return
-            
+
             # If not cached, do a new search
             st.session_state.loading = True
             try:
@@ -727,7 +553,12 @@ def handle_history_select(owm, location_str):
                 st.session_state.loading = False
             return
 
+
 def handle_location_select(owm, candidate):
+    """
+    Fetches and stores weather & air data in session_state.
+    IMPORTANT: removed st.rerun() calls; logic updated to be reactive via session_state.
+    """
     try:
         lat = candidate.get("lat")
         lon = candidate.get("lon")
@@ -735,47 +566,46 @@ def handle_location_select(owm, candidate):
             st.warning("Selected location has no coordinates")
             st.session_state.loading = False
             return
-            
+
         name = candidate.get("name")
         country = candidate.get("country")
         state = candidate.get("state")
         st.session_state.current_location = {
-            "name": name, 
-            "lat": lat, 
-            "lon": lon, 
-            "country": country, 
+            "name": name,
+            "lat": lat,
+            "lon": lon,
+            "country": country,
             "state": state
         }
-        
+
         label = f"{name}, {country}" + (f", {state}" if state else "")
         if label not in st.session_state.history:
             st.session_state.history.append(label)
             save_history()
-        
-        # Fetch weather data
+
+        # Fetch weather data (use cache if available)
         lockey = f"onecall::{lat:.4f},{lon:.4f}::units={st.session_state.units}"
         cached = cache_get(lockey)
         if cached:
             st.session_state.weather_data = cached
             fetch_air_pollution(owm, lat, lon)
             st.session_state.loading = False
-            st.experimental_rerun()
             return
-            
+
         st.session_state.weather_data = owm.onecall(
-            lat, 
-            lon, 
-            units=st.session_state.units, 
+            lat,
+            lon,
+            units=st.session_state.units,
             lang=DEFAULT_LANG
         )
         cache_put(lockey, st.session_state.weather_data)
         fetch_air_pollution(owm, lat, lon)
         st.session_state.loading = False
-        st.experimental_rerun()
-        
+
     except Exception as e:
         st.error(f"Error fetching weather data: {e}")
         st.session_state.loading = False
+
 
 def fetch_air_pollution(owm, lat, lon):
     try:
@@ -784,11 +614,354 @@ def fetch_air_pollution(owm, lat, lon):
         if cached_air:
             st.session_state.air_data = cached_air
             return
-            
+
         st.session_state.air_data = owm.air_pollution(lat, lon)
         cache_put(cache_key_air, st.session_state.air_data)
     except Exception as e:
         st.warning(f"Couldn't fetch air pollution data: {e}")
+
+
+def render_current_weather(owm, data, loc_dict):
+    tz_offset = data.get("timezone_offset", 0)
+    cur = data.get("current", {})
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        # Weather icon
+        icon_code = None
+        if cur.get("weather"):
+            w0 = cur.get("weather")[0] if isinstance(cur.get("weather"), list) and cur.get("weather") else {}
+            icon_code = w0.get("icon")
+
+        icon_path = get_weather_icon(icon_code)
+        if icon_path:
+            st.image(str(icon_path), width=120)
+        else:
+            st.write("")
+
+    with col2:
+        # Location and temperature
+        city_label = f"{loc_dict['name']}, {loc_dict['country']}"
+        if loc_dict.get("state"):
+            city_label += f", {loc_dict['state']}"
+        st.subheader(city_label)
+
+        temp = cur.get("temp")
+        if temp is None:
+            temp_display = "--"
+        else:
+            temp_display = f"{temp:.1f}"
+        deg = "°C" if st.session_state.units == "metric" else "°F"
+        st.metric("Temperature", f"{temp_display} {deg}", delta=None)
+
+        # Weather description
+        desc = ""
+        if cur.get("weather"):
+            w0 = cur.get("weather")[0] if isinstance(cur.get("weather"), list) and cur.get("weather") else {}
+            desc = w0.get("description", "").capitalize()
+        st.caption(desc)
+
+    # Sunrise/sunset (bigger text + larger custom progress bar)
+    sunrise_ts = cur.get("sunrise")
+    sunset_ts = cur.get("sunset")
+    sunrise = utc_to_local(sunrise_ts, tz_offset) if sunrise_ts else None
+    sunset = utc_to_local(sunset_ts, tz_offset) if sunset_ts else None
+
+    if sunrise and sunset:
+        hours = (sunset - sunrise).total_seconds() / 3600.0
+        # show larger text via styled markdown
+        st.markdown(
+            f"<div class='sunrise-sunset'>🌅 Sunrise: {sunrise.strftime('%H:%M:%S')} &nbsp;&nbsp; "
+            f"🌇 Sunset: {sunset.strftime('%H:%M:%S')} &nbsp;&nbsp; ⏱️ Day length: {hours:.1f}h</div>",
+            unsafe_allow_html=True
+        )
+
+        # Calculate progress and render a custom larger progress bar
+        now = datetime.utcnow() + timedelta(seconds=tz_offset)  # local now
+        total_seconds = (sunset - sunrise).total_seconds()
+        elapsed_seconds = (now - sunrise).total_seconds()
+        progress = max(0.0, min(1.0, elapsed_seconds / total_seconds)) if total_seconds > 0 else 0.0
+        pct = int(round(progress * 100))
+
+        # HTML/CSS progress bar (bigger and styled)
+        st.markdown(
+            f"""
+            <div class="sun-progress" aria-hidden="true">
+                <div class="bar" style="width: {pct}%;"></div>
+            </div>
+            <div style="font-size:13px; color: rgba(7,34,74,0.7); margin-top:6px;">Local time progress: {pct}%</div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # Additional metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        feels = cur.get('feels_like')
+        if feels is None:
+            feels_display = "--"
+        else:
+            feels_display = f"{feels:.1f} {deg}"
+        st.metric("Feels Like", feels_display)
+    with col2:
+        humidity = cur.get('humidity')
+        st.metric("Humidity", f"{humidity if humidity is not None else '--'}%")
+    with col3:
+        wind = cur.get('wind_speed')
+        st.metric("Wind Speed", f"{wind if wind is not None else '--'} m/s")
+
+
+def render_air_quality(airdata):
+    st.subheader("Air Quality")
+    if not airdata:
+        st.warning("Air quality data not available")
+        return
+
+    try:
+        rec = airdata.get("list", [{}])[0]
+        main = rec.get("main", {})
+        components = rec.get("components", {})
+        aqi = main.get("aqi")
+
+        level_text, color = ("-", "#999999")
+        if isinstance(aqi, int) and aqi in AQI_LEVELS:
+            level_text, color = AQI_LEVELS[aqi]
+
+        # AQI progress bar percent (1..5 mapped to 0..100)
+        perf = 0
+        if isinstance(aqi, int):
+            perf = int(round(((aqi - 1) / 4.0) * 100))
+
+        st.progress(perf, text=f"AQI: {aqi} - {level_text}")
+
+        # Pollutant details
+        pollutant_cols = st.columns(4)
+        i = 0
+        for k, v in components.items():
+            full = POLLUTANT_FULL.get(k.lower(), k.upper())
+            with pollutant_cols[i % 4]:
+                st.metric(full, f"{v}")
+            i += 1
+
+    except Exception as e:
+        st.error(f"Error rendering air quality: {e}")
+
+
+def render_forecast(daily, tz_offset_secs):
+    """
+    Build a tidy DataFrame for 7-day forecast and display as a styled dataframe
+    to avoid column overflow / overlap that happens with many narrow st.columns.
+    """
+    st.subheader("7-Day Forecast")
+
+    rows = []
+    for day in (daily or [])[:7]:
+        dt = utc_to_local(day.get("dt"), tz_offset_secs)
+        date_str = dt.strftime("%a, %d %b") if dt else "-"
+        tmin = day.get("temp", {}).get("min", None)
+        tmax = day.get("temp", {}).get("max", None)
+        pop = (day.get("pop", 0) * 100) if day.get("pop", 0) is not None else None
+        weather = day.get("weather", [{}])[0]
+        desc = weather.get("description", "").capitalize() if weather else ""
+        icon = weather.get("icon") if weather else None
+        rows.append({
+            "Date": date_str,
+            "Min (°C)" if st.session_state.units == "metric" else "Min (°F)": f"{tmin:.1f}" if isinstance(tmin, (int, float)) else "--",
+            "Max (°C)" if st.session_state.units == "metric" else "Max (°F)": f"{tmax:.1f}" if isinstance(tmax, (int, float)) else "--",
+            "Precip (%)": f"{pop:.0f}%" if isinstance(pop, (int, float)) else "--",
+            "Condition": desc,
+            "Icon": icon or ""
+        })
+
+    if not rows:
+        st.info("No forecast available")
+        return
+
+    df = pd.DataFrame(rows)
+    # Remove Icon column from visible df (we can keep it but it's not necessary)
+    df_display = df.drop(columns=["Icon"])
+
+    # Show styled dataframe with container width; CSS earlier will style table
+    # wrap dataframe in a container with class so CSS rules apply
+    st.markdown('<div class="forecast-table">', unsafe_allow_html=True)
+    st.dataframe(df_display, use_container_width=True, height=260)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+def plot_hourly_data(hourly, tz_offset_secs):
+    st.subheader("Hourly Forecast (48h)")
+
+    times = []
+    temps = []
+    pops = []
+    winds = []
+
+    for h in (hourly or [])[:48]:
+        ts = h.get("dt")
+        dt = utc_to_local(ts, tz_offset_secs)
+        times.append(dt)
+        temps.append(h.get("temp", math.nan))
+        pops.append((h.get("pop", 0)) * 100)
+        winds.append(h.get("wind_speed", 0))
+
+    # Create DataFrame
+    df = pd.DataFrame({
+        "Time": times,
+        "Temperature": temps,
+        "Precipitation": pops,
+        "Wind Speed": winds
+    })
+
+    # Create tabs for each chart
+    tab1, tab2, tab3 = st.tabs(["Temperature", "Precipitation", "Wind Speed"])
+
+    with tab1:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df["Time"],
+            y=df["Temperature"],
+            mode='lines+markers',
+            name='Temperature',
+            line=dict(color='#0369a1', width=3),
+            marker=dict(size=6, color='#0369a1')
+        ))
+        deg = "°C" if st.session_state.units == "metric" else "°F"
+        fig.update_layout(
+            title="Temperature Forecast",
+            xaxis_title="Time",
+            yaxis_title=f"Temperature ({deg})",
+            template="plotly_white" if st.session_state.theme == "light" else "plotly_dark",
+            plot_bgcolor = "rgba(0,0,0,0)",
+            paper_bgcolor = "rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab2:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=df["Time"],
+            y=df["Precipitation"],
+            name='Precipitation',
+            marker=dict(color='#60a5fa')
+        ))
+        fig.update_layout(
+            title="Precipitation Probability",
+            xaxis_title="Time",
+            yaxis_title="Probability (%)",
+            template="plotly_white" if st.session_state.theme == "light" else "plotly_dark",
+            plot_bgcolor = "rgba(0,0,0,0)",
+            paper_bgcolor = "rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab3:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=df["Time"],
+            y=df["Wind Speed"],
+            mode='lines+markers',
+            name='Wind Speed',
+            line=dict(color='#0ea5a6', width=2),
+            marker=dict(size=6, color='#0ea5a6')
+        ))
+        fig.update_layout(
+            title="Wind Speed Forecast",
+            xaxis_title="Time",
+            yaxis_title="Wind Speed (m/s)",
+            template="plotly_white" if st.session_state.theme == "light" else "plotly_dark",
+            plot_bgcolor = "rgba(0,0,0,0)",
+            paper_bgcolor = "rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def main():
+    # Initialize session state
+    init_session_state()
+
+    # Set page config
+    st.set_page_config(
+        page_title=APP_NAME,
+        page_icon="⛅",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+
+    # Theme toggle widget (no st.rerun required; Streamlit reruns automatically)
+    theme_col1, theme_col2 = st.columns([3, 1])
+    with theme_col1:
+        st.title(f"{APP_NAME} Weather Dashboard")
+    with theme_col2:
+        # checkbox acts like a toggle: checked => light theme
+        light_checked = st.checkbox("Light theme (pastel sky)", value=(st.session_state.theme == "light"))
+        # update theme reactively
+        st.session_state.theme = "light" if light_checked else "dark"
+
+    # Apply custom CSS depending on theme
+    apply_custom_css(st.session_state.theme)
+
+    # Check API key
+    if not OPENWEATHER_API_KEY:
+        st.error("No OpenWeather API key found. Please set OPENWEATHER_API_KEY in your environment or .env file.")
+        st.stop()
+
+    owm = OpenWeather(OPENWEATHER_API_KEY)
+
+    # Search controls (use a synchronous form submit)
+    with st.form(key="search_form"):
+        col1, col2, col3 = st.columns([4, 2, 1])
+
+        with col1:
+            city_input = st.text_input("Enter city", placeholder="e.g., 'Paris, FR' or 'Bangalore'")
+
+        with col2:
+            units = st.selectbox(
+                "Units",
+                ["metric (°C)", "imperial (°F)"],
+                index=0 if st.session_state.units == "metric" else 1
+            )
+            st.session_state.units = "metric" if units == "metric (°C)" else "imperial"
+
+        with col3:
+            submitted = st.form_submit_button("Search")
+
+    if submitted:
+        handle_search(owm, city_input)
+
+    # Display loading indicator
+    if st.session_state.get('loading', False):
+        with st.spinner("Fetching weather data..."):
+            time.sleep(0.2)
+
+    # Display weather data if available
+    if st.session_state.weather_data and st.session_state.current_location:
+        render_current_weather(owm, st.session_state.weather_data, st.session_state.current_location)
+
+        if st.session_state.air_data:
+            render_air_quality(st.session_state.air_data)
+
+        # Layout: hourly charts and forecast dataframe below to avoid overlap
+        st.markdown("---")
+        col_left, col_right = st.columns([2, 3])
+        with col_left:
+            # keep hourly charts here
+            plot_hourly_data(
+                st.session_state.weather_data.get("hourly", []),
+                st.session_state.weather_data.get("timezone_offset", 0)
+            )
+        with col_right:
+            # Put forecast dataframe here for better spacing (avoid 7 small columns)
+            render_forecast(
+                st.session_state.weather_data.get("daily", []),
+                st.session_state.weather_data.get("timezone_offset", 0)
+            )
+
+    # History section in sidebar
+    st.sidebar.subheader("Search History")
+    for loc in reversed(st.session_state.history[-10:]):
+        if st.sidebar.button(loc):
+            handle_history_select(owm, loc)
+
 
 if __name__ == "__main__":
     main()
