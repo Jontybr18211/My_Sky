@@ -40,7 +40,7 @@ from dotenv import load_dotenv
 # ---- Configuration & constants ----
 APP_NAME = "MySky⛅"
 CACHE_DIR = pathlib.Path.home() / ".mysky_cache"
-CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
+CACHE_TTL_SECONDS = 15 * 60
 GEOCODING_LIMIT = 5
 DEFAULT_UNITS = "metric"
 DEFAULT_LANG = "en"
@@ -505,7 +505,7 @@ class WeatherMainWindow(QWidget):
         fc_layout = QHBoxLayout()
         self.forecast_scroll = QScrollArea()
         self.forecast_scroll.setWidgetResizable(True)
-        self.forecast_scroll.setFixedHeight(320)  # increased Y-axis space
+        self.forecast_scroll.setFixedHeight(320)
         self.forecast_container = QWidget()
         self.forecast_layout = QHBoxLayout()
         self.forecast_container.setLayout(self.forecast_layout)
