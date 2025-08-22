@@ -6,3 +6,4 @@ python-dotenv==1.1.1
 
 Dependencies
 numpy==2.3.2
+streamlit
