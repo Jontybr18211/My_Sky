@@ -1,6 +1,6 @@
 # MySky Weather Dashboard
 
-A desktop weather dashboard built with Python and PyQt6, powered by the OpenWeatherMap API. This application provides a clean, modern interface to view current weather conditions, a 7-day forecast, and detailed hourly charts for temperature, precipitation, and wind speed.
+A desktop weather dashboard built with Python and PyQt6, powered by the OpenWeatherMap API. This application provides a clean, modern interface to view current weather conditions, a 7-day forecast, and detailed hourly charts for temperature, precipitation, and wind speed. Also hosted in Straeamlit.
 
 ---
 
